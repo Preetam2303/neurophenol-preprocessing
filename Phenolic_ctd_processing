@@ -1,0 +1,145 @@
+#!/usr/bin/env Rscript
+################################################################################
+# phenolic_ctd_processing.R
+#
+# Purpose:
+#   - Load CTD chemical–gene interaction data  
+#   - Extract interactions involving phenolic compounds  
+#   - Summarize and export:
+#       • phenolic_chemical_gene_interactions.csv  
+#       • gene_chemical_counts.csv  
+#       • compound_gene_map.csv  
+#       • compound_gene_edges.tsv  
+#
+# Usage:
+#   Place this script at your repository root. From the project directory:
+#     Rscript scripts/phenolic_ctd_processing.R
+#
+# Project structure:
+#   ├── data/
+#   │   └── CTD_gene_cgixns_1754297452048.csv
+#   ├── results/
+#   └── scripts/
+#       └── phenolic_ctd_processing.R   ← this file
+#
+# Dependencies:
+#   * dplyr, readr, stringr, tidyr
+#
+################################################################################
+
+# 0. Setup ---------------------------------------------------------------------
+
+# Define paths
+data_dir    <- file.path("data")
+input_file  <- file.path(data_dir, "CTD_gene_cgixns_1754297452048.csv")
+results_dir <- file.path("results", "phenolic_ctd")
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+
+# CRAN packages required
+required_pkgs <- c("dplyr", "readr", "stringr", "tidyr")
+installed_pkgs <- rownames(installed.packages())
+for (pkg in required_pkgs) {
+  if (!pkg %in% installed_pkgs) {
+    install.packages(pkg, repos = "https://cloud.r-project.org")
+  }
+}
+library(dplyr)
+library(readr)
+library(stringr)
+library(tidyr)
+
+# 1. Load CTD data ------------------------------------------------------------
+
+if (!file.exists(input_file)) {
+  stop("Input CTD file not found: ", input_file)
+}
+
+ctd_data <- read_csv(input_file, col_types = cols())
+
+message("Loaded CTD data: ", nrow(ctd_data), " rows")
+
+# 2. Filter for phenolic compounds --------------------------------------------
+
+# Define fuzzy keywords for phenolic compounds
+phenolic_keywords <- c(
+  "resver", "quercet", "curcumin", "epigallo",
+  "kaempferol", "naringen", "luteolin", "gallic",
+  "ellagic", "catechin", "caffeic", "ferulic"
+)
+
+phenol_data <- ctd_data %>%
+  mutate(ChemicalName_lower = tolower(ChemicalName)) %>%
+  filter(
+    str_detect(
+      ChemicalName_lower,
+      regex(str_c(phenolic_keywords, collapse = "|"), ignore_case = TRUE)
+    )
+  ) %>%
+  select(-ChemicalName_lower)
+
+message(
+  "Filtered phenolic interactions: ",
+  nrow(phenol_data),
+  " rows, involving ",
+  n_distinct(phenol_data$ChemicalName),
+  " compounds and ",
+  n_distinct(phenol_data$GeneSymbol),
+  " genes"
+)
+
+# 3. Summaries & maps ---------------------------------------------------------
+
+# 3a. Count unique genes per phenolic compound
+compound_gene_map <- phenol_data %>%
+  distinct(ChemicalName, GeneSymbol) %>%
+  group_by(ChemicalName) %>%
+  summarize(
+    NumGenes = n(),
+    Genes    = paste(sort(unique(GeneSymbol)), collapse = "; "),
+    .groups  = "drop"
+  ) %>%
+  arrange(desc(NumGenes))
+
+# 3b. Count unique chemicals per gene
+gene_chemical_counts <- phenol_data %>%
+  distinct(GeneSymbol, ChemicalName) %>%
+  count(GeneSymbol, name = "NumCompounds") %>%
+  arrange(desc(NumCompounds))
+
+# 3c. Unique edges for network import
+compound_gene_edges <- phenol_data %>%
+  distinct(ChemicalName, GeneSymbol)
+
+# 4. Export results -----------------------------------------------------------
+
+write_csv(
+  phenol_data,
+  file.path(results_dir, "phenolic_chemical_gene_interactions.csv")
+)
+
+write_csv(
+  compound_gene_map,
+  file.path(results_dir, "compound_gene_map.csv")
+)
+
+write_csv(
+  gene_chemical_counts,
+  file.path(results_dir, "gene_chemical_counts.csv")
+)
+
+write_tsv(
+  compound_gene_edges,
+  file.path(results_dir, "compound_gene_edges.tsv"),
+  col_names = FALSE
+)
+
+message("All results written to: ", normalizePath(results_dir))
+
+# 5. Session information ------------------------------------------------------
+
+writeLines(
+  capture.output(sessionInfo()),
+  file = file.path(results_dir, "sessionInfo_phenolic_ctd.txt")
+)
+
+message("phenolic_ctd_processing.R completed successfully.")
