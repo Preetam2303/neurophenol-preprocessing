@@ -1,0 +1,110 @@
+################################################################################
+# analysis_alzheimer_vs_control.R
+#
+# Loads the pre–processed data saved by preprocessing_neurophenol.R
+# and runs a limma‐based differential expression analysis
+# comparing Alzheimer’s disease vs non-demented controls.
+################################################################################
+
+## 0. Parameters & Setup ------------------------------------------------------
+
+data_dir     <- "C:/Users/KIIT/Downloads/neurophenol"
+preproc_file <- file.path(data_dir, "neurophenol_preprocessed.RData")
+output_dir   <- file.path(data_dir, "results")
+
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+setwd(data_dir)
+
+## 1. Load preprocessed data --------------------------------------------------
+
+# This file must contain: 
+#   exprs_data, exprs_filt, exprs_knn, norm_data_aligned, pheno_sub
+load(preproc_file)
+
+## 2. Build expression matrix & phenotype ------------------------------------
+
+# norm_data_aligned has first two metadata cols + samples in pheno_sub order
+expr <- as.matrix( norm_data_aligned[, -c(1,2)] )
+rownames(expr) <- rownames(norm_data_aligned)
+
+pheno <- pheno_sub
+
+# Ensure samples line up
+stopifnot(all(colnames(expr) == pheno$title_clean))
+
+## 3. Differential expression with limma ---------------------------------------
+
+if (!requireNamespace("limma", quietly = TRUE)) 
+  BiocManager::install("limma")
+library(limma)
+
+# Define groups
+pheno$group <- factor(
+  pheno$group, 
+  levels = c("non-demented", "Alzheimer's disease")
+)
+
+design <- model.matrix(~0 + pheno$group)
+colnames(design) <- c("Control", "AD")
+
+# Contrast: AD vs Control
+contrast <- makeContrasts(AD_vs_Control = AD - Control, levels = design)
+
+# Fit model
+fit   <- lmFit(expr, design)
+fit2  <- contrasts.fit(fit, contrast)
+fit2  <- eBayes(fit2)
+
+# Extract all results & significant hits
+deg_all <- topTable(fit2, number = Inf, adjust.method = "fdr")
+deg_sig <- subset(deg_all, adj.P.Val < 0.0005 & abs(logFC) > 1)
+
+# Write outputs
+write.csv(deg_all, file.path(output_dir, "deg_all.csv"), row.names = TRUE)
+write.csv(deg_sig, file.path(output_dir, "deg_significant.csv"), row.names = TRUE)
+
+## 4. Volcano plot -------------------------------------------------------------
+
+if (!requireNamespace("ggplot2", quietly = TRUE)) install.packages("ggplot2")
+if (!requireNamespace("ggrepel", quietly = TRUE)) install.packages("ggrepel")
+library(ggplot2)
+library(ggrepel)
+
+# Annotate categories
+deg_all$Gene     <- rownames(deg_all)
+deg_all$Category <- with(deg_all,
+  ifelse(adj.P.Val < 0.0005 & logFC >  1, "Up",
+  ifelse(adj.P.Val < 0.0005 & logFC < -1, "Down", "NS"))
+)
+
+# Top 10 for labels
+top10 <- head(deg_all[deg_all$Category != "NS", ], 10)
+
+p <- ggplot(deg_all, aes(x = logFC, y = -log10(adj.P.Val))) +
+  geom_point(aes(color = Category), alpha = 0.6) +
+  scale_color_manual(values = c(Up = "red", Down = "blue", NS = "grey70")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.0005), linetype = "dashed") +
+  geom_text_repel(
+    data        = top10,
+    aes(label = Gene),
+    size        = 3,
+    box.padding = 0.4,
+    show.legend = FALSE
+  ) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Volcano Plot: Alzheimer’s vs Control",
+    x     = "log2 Fold Change",
+    y     = "-log10(Adjusted P-Value)",
+    color = "Category"
+  )
+
+ggsave(
+  filename = file.path(output_dir, "volcano_plot.png"),
+  plot     = p,
+  width    = 8,
+  height   = 6
+)
+
+message("Analysis complete. All results and plots are saved in:\n  ", output_dir)
