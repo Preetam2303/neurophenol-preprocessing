@@ -1,0 +1,147 @@
+################################################################################
+# analysis_hd_vs_control_and_compare.R
+#
+# 1) Differential expression: Huntington’s vs non-demented controls  
+# 2) Volcano plot of HD DEGs  
+# 3) Compare HD and AD DEGs with a Venn diagram  
+################################################################################
+
+## 0. Parameters & Setup ------------------------------------------------------
+
+data_dir         <- "C:/Users/KIIT/Downloads/neurophenol"
+workspace_zip    <- file.path(data_dir, "neurophenol_analysis_session.zip")
+workspace_rdata  <- file.path(data_dir, "neurophenol_analysis_session.RData")
+results_dir      <- file.path(data_dir, "results", "HD_vs_Control")
+adz_results_dir  <- file.path(data_dir, "results")  # contains AD deg CSVs
+
+dirs <- c(results_dir, adz_results_dir)
+lapply(dirs, dir.create, recursive = TRUE, showWarnings = FALSE)
+setwd(data_dir)
+
+## 1. Load workspace (expr & pheno_mat) ---------------------------------------
+
+if (!file.exists(workspace_rdata)) {
+  if (file.exists(workspace_zip)) {
+    unzip(workspace_zip, exdir = data_dir)
+  } else {
+    stop("Cannot find workspace RData or ZIP in ", data_dir)
+  }
+}
+load(workspace_rdata)
+# expected objects: expr (matrix or data.frame), pheno_mat (data.frame)
+
+## 2. Prepare expression & phenotype ------------------------------------------
+
+library(dplyr)
+
+# Ensure phenotype rownames are GSM IDs
+rownames(pheno_mat) <- pheno_mat$geo_accession
+
+# Extract and clean disease labels
+pheno_mat$group <- pheno_mat$characteristics_ch2.3 %>%
+  sub(".*: ", "", .) %>%
+  factor(levels = c("non-demented", "Huntington's disease"))
+
+# Subset to HD vs Control
+pheno_sub <- filter(pheno_mat, group %in% c("non-demented", "Huntington's disease"))
+
+# Prepare expression matrix: remove gene‐name column if present
+expr_mat <- expr
+if ("gene" %in% colnames(expr_mat)) {
+  genes <- expr_mat[ , "gene"]
+  expr_mat <- expr_mat[ , setdiff(colnames(expr_mat), "gene"), drop = FALSE]
+  rownames(expr_mat) <- genes
+}
+expr_sub <- expr_mat[, rownames(pheno_sub), drop = FALSE]
+
+# Check alignment
+stopifnot(all(colnames(expr_sub) == rownames(pheno_sub)))
+
+## 3. Limma DE analysis for HD -----------------------------------------------
+
+library(limma)
+
+design <- model.matrix(~0 + pheno_sub$group)
+colnames(design) <- c("Control","HD")
+
+contrast <- makeContrasts(HD_vs_Control = HD - Control, levels = design)
+
+fit   <- lmFit(expr_sub, design)
+fit2  <- contrasts.fit(fit, contrast)
+fit2  <- eBayes(fit2)
+
+deg_hd_all <- topTable(fit2, number = Inf, adjust.method = "fdr")
+deg_hd_sig <- subset(deg_hd_all, adj.P.Val < 0.0005 & abs(logFC) > 1)
+
+# Save tables
+write.csv(deg_hd_all,
+          file.path(results_dir, "deg_hd_all.csv"),
+          row.names = TRUE)
+write.csv(deg_hd_sig,
+          file.path(results_dir, "deg_hd_significant.csv"),
+          row.names = TRUE)
+
+## 4. Volcano plot of HD DEGs -----------------------------------------------
+
+library(ggplot2)
+library(ggrepel)
+
+deg_hd_all$Gene        <- rownames(deg_hd_all)
+deg_hd_all$Significance <- "Not Significant"
+deg_hd_all$Significance[deg_hd_all$adj.P.Val < 0.0005 & deg_hd_all$logFC >  1] <- "Up"
+deg_hd_all$Significance[deg_hd_all$adj.P.Val < 0.0005 & deg_hd_all$logFC < -1] <- "Down"
+
+top10_hd <- deg_hd_all %>%
+  filter(Significance != "Not Significant") %>%
+  arrange(adj.P.Val, -abs(logFC)) %>%
+  head(10)
+
+p_hd <- ggplot(deg_hd_all, aes(x = logFC, y = -log10(adj.P.Val))) +
+  geom_point(aes(color = Significance), alpha = 0.6) +
+  scale_color_manual(values = c(Up="red",Down="blue","Not Significant"="grey70")) +
+  geom_vline(xintercept = c(-1,1), linetype="dashed") +
+  geom_hline(yintercept = -log10(0.0005), linetype="dashed") +
+  geom_text_repel(
+    data = top10_hd,
+    aes(label = Gene),
+    size = 3,
+    max.overlaps = 30
+  ) +
+  labs(
+    title = "Volcano Plot: Huntington’s vs Control",
+    x     = "log2 Fold Change",
+    y     = "-log10(Adjusted P-Value)"
+  ) +
+  theme_minimal(base_size = 14)
+
+ggsave(filename = file.path(results_dir, "volcano_hd.png"),
+       plot     = p_hd,
+       width    = 8, height = 6)
+
+## 5. Venn diagram: AD vs HD significant DEGs --------------------------------
+
+# Load Alzheimer's significant gene list
+deg_ad_sig <- read.csv(file.path(adz_results_dir, "deg_significant.csv"),
+                       row.names = 1, stringsAsFactors = FALSE)
+alz_genes <- rownames(deg_ad_sig)
+
+hd_genes  <- rownames(deg_hd_sig)
+gene_lists <- list(Alzheimer=alz_genes, Huntington=hd_genes)
+
+# Draw Venn diagram
+library(ggvenn)
+png(file.path(results_dir, "venn_alz_hd.png"), width=600, height=600)
+ggvenn(
+  gene_lists,
+  fill_color      = c("tomato","skyblue"),
+  stroke_size     = 0.5,
+  set_name_size   = 4
+) + labs(title="DEG Overlap: Alzheimer’s vs Huntington’s")
+dev.off()
+
+## 6. Session info & completion ----------------------------------------------
+
+writeLines(capture.output(sessionInfo()),
+           con = file.path(results_dir, "sessionInfo_HD.txt"))
+
+message("Huntington’s DE analysis and AD-HD comparison complete.")
