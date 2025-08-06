@@ -3,7 +3,12 @@
 #
 # 1) Differential expression: Huntington’s vs non-demented controls  
 # 2) Volcano plot of HD DEGs  
-# 3) Compare HD and AD DEGs with a Venn diagram  
+# 3) Compare HD and AD DEGs with a Venn diagram 
+# 4) Subset the Z-scored matrix to your 618 test samples
+
+# 5) Build a HeatmapAnnotation for gender, age and disease group
+
+# 6) Draw and export a publication-ready ComplexHeatmap
 ################################################################################
 
 ## 0. Parameters & Setup ------------------------------------------------------
@@ -145,3 +150,87 @@ writeLines(capture.output(sessionInfo()),
            con = file.path(results_dir, "sessionInfo_HD.txt"))
 
 message("Huntington’s DE analysis and AD-HD comparison complete.")
+#####################################################################################################################################################################3
+# 0. Install/load required packages --------------------------------------------
+# install.packages(c("ComplexHeatmap","circlize","RColorBrewer","grid"))
+library(ComplexHeatmap)
+library(circlize)
+library(RColorBrewer)
+library(grid)
+
+# 1. Prepare expression matrix and annotations --------------------------------
+
+# Subset to 618 samples (already in `mat_top20_z`)
+mat_test <- mat_top20_z[, 1:618]
+
+# Clean up phenotype for annotation
+# assume `pheno` has columns: geo_accession, `gender:ch2`, `age:ch2`, `disease status:ch2`
+pheno$gender    <- pheno$`gender:ch2`
+pheno$age_clean <- as.numeric(gsub(" ?yrs", "", pheno$`age:ch2`))
+pheno$Group     <- pheno$`disease status:ch2`
+
+# Match samples and pick only necessary cols
+annot_col <- pheno[ match(colnames(mat_test), pheno$geo_accession),
+                    c("geo_accession","gender","age_clean","Group") ]
+colnames(annot_col)[4] <- "Group"
+rownames(annot_col)  <- annot_col$geo_accession
+annot_col$geo_accession <- NULL
+
+# Ensure rows of annotation correspond to mat_test columns
+stopifnot(all(rownames(annot_col) == colnames(mat_test)))
+
+# 2. Define color mappings ----------------------------------------------------
+
+# Gender
+gender_colors <- c("male"="#F8766D","female"="#00BFC4")
+
+# Group (disease status); auto-pick distinct colors
+group_levels   <- unique(na.omit(as.character(annot_col$Group)))
+group_palette  <- brewer.pal(n = max(3, length(group_levels)), "Set1")[1:length(group_levels)]
+names(group_palette) <- group_levels
+
+# Age gradient
+age_col_fun <- colorRamp2(
+  range(annot_col$age_clean, na.rm=TRUE),
+  c("lightblue","darkblue")
+)
+
+# 3. Build HeatmapAnnotation --------------------------------------------------
+ha_col <- HeatmapAnnotation(
+  Gender = annot_col$gender,
+  Age    = annot_col$age_clean,
+  Group  = annot_col$Group,
+  col    = list(
+    Gender = gender_colors,
+    Age    = age_col_fun,
+    Group  = group_palette
+  ),
+  annotation_legend_param = list(
+    Gender = list(title="Gender", title_gp=gpar(fontsize=10), labels_gp=gpar(fontsize=8)),
+    Age    = list(title="Age",    title_gp=gpar(fontsize=10), labels_gp=gpar(fontsize=8)),
+    Group  = list(title="Group",  title_gp=gpar(fontsize=10), labels_gp=gpar(fontsize=8))
+  )
+)
+
+# 4. Draw and save the heatmap ------------------------------------------------
+
+pdf("Top20_CommonGenes_ComplexHeatmap.pdf", width=8, height=7)
+ComplexHeatmap::Heatmap(
+  mat_test,
+  name                = "Z-score",
+  top_annotation      = ha_col,
+  show_column_names   = FALSE,
+  show_row_names      = TRUE,
+  cluster_rows        = TRUE,
+  cluster_columns     = TRUE,
+  row_title           = "Top 20 Common DEGs",
+  column_title        = "Samples (n=618)",
+  col                 = colorRamp2(c(-2,0,2), c("blue","white","red")),
+  heatmap_legend_param= list(
+    title       = "Z-score",
+    title_gp    = gpar(fontsize=10),
+    labels_gp   = gpar(fontsize=8)
+  )
+)
+dev.off()
+
