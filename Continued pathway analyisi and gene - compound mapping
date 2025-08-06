@@ -1,0 +1,209 @@
+################################################################################
+# enrichment_and_external_integration.R
+#
+# 1) ORA & GSEA: MSigDB Hallmark, GO BP, KEGG, Reactome  
+# 2) Neuro‐term filtering & Venn diagram  
+# 3) CTD chemical–gene interactions (neuro & phenolic)  
+# 4) DisGeNET neuro‐disease filtering  
+################################################################################
+
+## 0. Parameters & Directories -----------------------------------------------
+
+data_dir        <- "C:/Users/KIIT/Downloads/neurophenol"
+results_dir     <- file.path(data_dir, "results")
+enrich_dir      <- file.path(results_dir, "enrichment")
+ctd_file        <- file.path(data_dir, "CTD_gene_cgixns_1754126394374.csv")
+disgenet_xlsx   <- file.path(data_dir, "gene from dsignet.xlsx")
+
+dirs <- list(results_dir, enrich_dir)
+lapply(dirs, dir.create, recursive = TRUE, showWarnings = FALSE)
+setwd(data_dir)
+
+## 1. Load Differential Expression Results -----------------------------------
+
+deg_all <- read.csv(file.path(results_dir, "deg_all.csv"),
+                    row.names = 1, stringsAsFactors = FALSE)
+deg_sig <- read.csv(file.path(results_dir, "deg_significant.csv"),
+                    row.names = 1, stringsAsFactors = FALSE)
+
+## 2. Prepare Ranked Gene List & Entrez Mapping ------------------------------
+
+# ranked vector: logFC named by SYMBOL
+gene_list   <- sort(na.omit(deg_all$logFC), decreasing = TRUE)
+names(gene_list) <- rownames(deg_all)
+
+# map SYMBOL → ENTREZID
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) {
+  install.packages("clusterProfiler")
+}
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) {
+  BiocManager::install("org.Hs.eg.db")
+}
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+sym2entrez <- bitr(names(gene_list),
+                   fromType = "SYMBOL",
+                   toType   = "ENTREZID",
+                   OrgDb    = org.Hs.eg.db)
+sym2entrez <- sym2entrez[!duplicated(sym2entrez$ENTREZID), ]
+
+gene_list_entrez <- gene_list[sym2entrez$SYMBOL]
+names(gene_list_entrez) <- sym2entrez$ENTREZID
+
+## 3. ORA & GSEA Analyses -----------------------------------------------------
+
+library(msigdbr)
+library(enrichplot)
+library(ReactomePA)
+options(timeout = 300)
+
+# 3.1 MSigDB Hallmark GSEA
+msig_h <- msigdbr(species = "Homo sapiens", collection = "H")
+term2gene_h <- msig_h %>% 
+  dplyr::select(gs_name, entrez_gene)
+gsea_hallmark <- GSEA(geneList    = gene_list_entrez,
+                      TERM2GENE   = term2gene_h,
+                      pvalueCutoff= 0.5)
+write.csv(as.data.frame(gsea_hallmark),
+          file.path(enrich_dir, "GSEA_Hallmark.csv"),
+          row.names = FALSE)
+ggsave(
+  file.path(enrich_dir, "GSEA_Hallmark_dotplot.png"),
+  dotplot(gsea_hallmark, showCategory = 20) +
+    ggtitle("GSEA: MSigDB Hallmark"),
+  width = 8, height = 6
+)
+
+# 3.2 GSEA GO Biological Process
+gsea_go_bp <- gseGO(geneList     = gene_list_entrez,
+                    OrgDb        = org.Hs.eg.db,
+                    ont          = "BP",
+                    keyType      = "ENTREZID",
+                    pvalueCutoff = 0.05,
+                    verbose      = FALSE)
+write.csv(as.data.frame(gsea_go_bp),
+          file.path(enrich_dir, "GSEA_GO_BP.csv"),
+          row.names = FALSE)
+ggsave(
+  file.path(enrich_dir, "GSEA_GO_BP_dotplot.png"),
+  dotplot(gsea_go_bp, showCategory = 20) +
+    ggtitle("GSEA: GO Biological Process"),
+  width = 8, height = 6
+)
+
+# 3.3 GSEA KEGG Pathways
+gsea_kegg <- gseKEGG(geneList     = gene_list_entrez,
+                     organism     = "hsa",
+                     keyType      = "ncbi-geneid",
+                     pvalueCutoff = 0.05,
+                     verbose      = FALSE)
+write.csv(as.data.frame(gsea_kegg),
+          file.path(enrich_dir, "GSEA_KEGG.csv"),
+          row.names = FALSE)
+ggsave(
+  file.path(enrich_dir, "GSEA_KEGG_dotplot.png"),
+  dotplot(gsea_kegg, showCategory = 20) +
+    ggtitle("GSEA: KEGG Pathways"),
+  width = 8, height = 6
+)
+
+# 3.4 GSEA Reactome Pathways
+gsea_reactome <- gsePathway(geneList     = gene_list_entrez,
+                            organism     = "human",
+                            pvalueCutoff = 0.05,
+                            verbose      = FALSE)
+write.csv(as.data.frame(gsea_reactome),
+          file.path(enrich_dir, "GSEA_Reactome.csv"),
+          row.names = FALSE)
+ggsave(
+  file.path(enrich_dir, "GSEA_Reactome_dotplot.png"),
+  dotplot(gsea_reactome, showCategory = 20) +
+    ggtitle("GSEA: Reactome Pathways"),
+  width = 8, height = 6
+)
+
+## 4. Neuro‐term Filtering & Venn Diagram -------------------------------------
+
+neuro_kw <- c("neuro", "brain", "synapse", "axon", "dendrite",
+              "glia", "memory", "GABA", "cognition")
+filter_terms <- function(df) {
+  df %>% filter(grepl(paste(neuro_kw, collapse = "|"),
+                      Description, ignore.case = TRUE))
+}
+
+gsea_list <- list(
+  GO       = filter_terms(as.data.frame(gsea_go_bp)),
+  KEGG     = filter_terms(as.data.frame(gsea_kegg)),
+  Reactome = filter_terms(as.data.frame(gsea_reactome)),
+  Hallmark = filter_terms(as.data.frame(gsea_hallmark))
+)
+
+# draw and save Venn
+venn  <- venn.diagram(
+  x        = lapply(gsea_list, `[[`, "Description"),
+  filename = NULL,
+  fill     = c("skyblue","pink","lightgreen","orange")
+)
+png(file.path(enrich_dir, "Neuro_GSEA_Venn.png"),
+    width=600, height=600)
+grid::grid.draw(venn)
+dev.off()
+
+## 5. CTD Chemical–Gene Interactions -----------------------------------------
+
+library(readr)
+library(stringr)
+ctd <- read_csv(ctd_file, show_col_types = FALSE)
+
+# neuro‐related CTD interactions
+ctd_neuro <- ctd %>%
+  filter(str_detect(tolower(Interaction),
+                    paste(neuro_kw, collapse = "|")) |
+         str_detect(tolower(ChemicalName),
+                    paste(neuro_kw, collapse = "|")))
+write_csv(ctd_neuro,
+          file.path(data_dir, "filtered_neuro_CTD_interactions.csv"))
+
+# phenolic compounds list
+phenols <- c("resveratrol", "quercetin", "curcumin", "epigallocatechin",
+             "kaempferol", "naringenin", "luteolin", "gallic acid",
+             "ellagic acid", "catechin")
+ctd$Chemical_lower <- tolower(ctd$ChemicalName)
+ctd_phenol <- ctd %>%
+  filter(str_detect(Chemical_lower,
+                    paste(phenols, collapse = "|")))
+write_csv(ctd_phenol,
+          file.path(data_dir, "neuro_phenol_interactions.csv"))
+
+# network edges & nodes
+edges <- ctd_phenol %>% distinct(ChemicalName, GeneSymbol)
+write_tsv(edges, file.path(data_dir, "compound_gene_edges.tsv"))
+
+nodes <- bind_rows(
+  ctd_phenol %>% distinct(ChemicalName) %>%
+    transmute(Node = ChemicalName, Type = "Compound"),
+  ctd_phenol %>% distinct(GeneSymbol) %>%
+    transmute(Node = GeneSymbol, Type = "Gene")
+)
+write_csv(nodes, file.path(data_dir, "compound_gene_nodes.csv"))
+
+## 6. DisGeNET Neuro‐Disease Filtering ----------------------------------------
+
+library(readxl)
+dgs <- read_excel(disgenet_xlsx, sheet = 1)
+colnames(dgs) <- tolower(colnames(dgs))
+
+dgs_neuro <- dgs %>%
+  filter(str_detect(disease_name,
+                    paste(neuro_kw, collapse = "|")) |
+         str_detect(disease_type,
+                    paste(neuro_kw, collapse = "|")))
+write_tsv(dgs_neuro,
+          file.path(data_dir, "neuro_disgenet_diseases.tsv"))
+
+## 7. Session Info & Completion ----------------------------------------------
+
+writeLines(capture.output(sessionInfo()),
+           file.path(results_dir, "enrichment_sessionInfo.txt"))
+message("All enrichment and external‐data analyses complete.")
