@@ -1,0 +1,133 @@
+################################################################################
+# preprocessing_neurophenol.R
+# Robust preprocessing of GSE33000 expression data:
+#  - missing‐value filtering
+#  - KNN imputation
+#  - quantile normalization
+#  - sample/phenotype alignment
+################################################################################
+
+## 0. Setup --------------------------------------------------------------------
+
+# parameters
+data_dir       <- "C:/Users/KIIT/Downloads/neurophenol"
+raw_fname      <- "GSE33000_raw_data.txt.gz"
+preproc_fname  <- "neurophenol_preprocessed.RData"
+geo_accession  <- "GSE33000"
+
+# create/check working directory
+if (!dir.exists(data_dir)) {
+  stop("Data directory does not exist: ", data_dir)
+}
+setwd(data_dir)
+
+## 1. Load expression matrix --------------------------------------------------
+
+message("Loading raw expression data...")
+exprs_data <- tryCatch({
+  read.delim(gzfile(raw_fname), header = TRUE,
+             row.names = 1, check.names = FALSE,
+             stringsAsFactors = FALSE)
+}, error = function(e) {
+  stop("Failed to read raw data: ", e$message)
+})
+message("  Dimensions: ", paste(dim(exprs_data), collapse = " x "))
+
+## 2. Download phenotype ------------------------------------------------------
+
+if (!requireNamespace("GEOquery", quietly = TRUE)) {
+  install.packages("GEOquery")
+}
+library(GEOquery)
+message("Fetching phenotype data from GEO...")
+gse   <- getGEO(geo_accession, GSEMatrix = TRUE)
+eset  <- gse[[1]]
+pheno <- pData(eset)
+stopifnot("title" %in% colnames(pheno), "geo_accession" %in% colnames(pheno))
+
+## 3. Missing‐value filtering -------------------------------------------------
+
+filter_missing <- function(mat, probe_thresh = 0.3, sample_thresh = 0.2) {
+  # probe‐level filtering
+  probe_na   <- rowSums(is.na(mat))
+  keep_probe <- probe_na <= ncol(mat) * probe_thresh
+  mat2       <- mat[keep_probe, , drop = FALSE]
+
+  # sample‐level filtering
+  sample_na   <- colSums(is.na(mat2))
+  keep_sample <- sample_na <= nrow(mat2) * sample_thresh
+  mat3        <- mat2[, keep_sample, drop = FALSE]
+
+  return(mat3)
+}
+
+message("Applying missing-value filters...")
+exprs_filt <- filter_missing(exprs_data, probe_thresh = 0.3, sample_thresh = 0.2)
+message("  After probe/sample filter: ", paste(dim(exprs_filt), collapse = " x "))
+
+## 4. KNN imputation -----------------------------------------------------------
+
+if (!requireNamespace("impute", quietly = TRUE)) {
+  BiocManager::install("impute")
+}
+library(impute)
+
+message("Running KNN imputation (k = 10)...")
+exprs_num <- data.matrix(exprs_filt)
+exprs_num[!is.finite(exprs_num)] <- NA
+knn_out    <- impute.knn(exprs_num, k = 10)
+exprs_knn  <- knn_out$data
+message("  NAs remaining after impute: ", sum(is.na(exprs_knn)))
+
+## 5. Quantile normalization --------------------------------------------------
+
+if (!requireNamespace("limma", quietly = TRUE)) {
+  BiocManager::install("limma")
+}
+library(limma)
+
+message("Performing quantile normalization...")
+norm_data <- normalizeBetweenArrays(exprs_knn, method = "quantile")
+message("  Normalized matrix dims: ", paste(dim(norm_data), collapse = " x "))
+
+## 6. Align samples with phenotype --------------------------------------------
+
+# clean sample titles for matching
+pheno$title_clean <- gsub("[^A-Za-z0-9_]", "", pheno$title)
+rownames(pheno)    <- pheno$geo_accession
+
+# rename columns of normalized data using GEO accessions
+orig_samps <- colnames(norm_data)
+# assume original samples follow pattern "HBTRC_PF_Pool_<n>"
+clean_samps <- sub("^HBTRC_PF_Pool_", "", orig_samps)
+colnames(norm_data) <- clean_samps
+
+# keep only those present in pheno
+common_samps <- intersect(clean_samps, pheno$title_clean)
+if (length(common_samps) == 0) stop("No sample names match phenotype titles")
+
+# reorder columns to match phenotype order
+norm_data_aligned <- norm_data[, common_samps, drop = FALSE]
+pheno_sub <- pheno[pheno$title_clean %in% common_samps, , drop = FALSE]
+
+# verify alignment
+if (!all(colnames(norm_data_aligned) == pheno_sub$title_clean)) {
+  stop("Column names and phenotype titles are out of sync")
+}
+
+message("Samples aligned: ", ncol(norm_data_aligned))
+
+## 7. Save processed data -----------------------------------------------------
+
+save(exprs_data,
+     exprs_filt,
+     exprs_knn,
+     norm_data_aligned,
+     pheno_sub,
+     file = preproc_fname)
+
+message("Preprocessing complete. Results saved to ", preproc_fname)
+
+################################################################################
+# End of preprocessing_neurophenol.R
+################################################################################
