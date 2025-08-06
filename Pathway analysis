@@ -1,0 +1,170 @@
+################################################################################
+# enrichment_ad_analysis.R
+#
+# Gene‐ontology, pathway, and GSEA analyses for Alzheimer’s DEGs
+################################################################################
+
+## 0. Setup --------------------------------------------------------------------
+
+# Paths
+data_dir       <- "C:/Users/KIIT/Downloads/neurophenol"
+results_dir    <- file.path(data_dir, "results")
+enrich_dir     <- file.path(results_dir, "enrichment")
+dir.create(enrich_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Input files from differential expression step
+deg_all_file <- file.path(results_dir, "deg_all.csv")
+deg_sig_file <- file.path(results_dir, "deg_significant.csv")
+
+## 1. Load differential expression results ------------------------------------
+
+deg_all <- read.csv(deg_all_file, row.names = 1, stringsAsFactors = FALSE)
+deg_sig <- read.csv(deg_sig_file,  row.names = 1, stringsAsFactors = FALSE)
+
+## 2. Prepare gene lists ------------------------------------------------------
+
+# Gene symbols
+sig_symbols <- rownames(deg_sig)
+
+# Convert SYMBOL → ENTREZID
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) {
+  install.packages("clusterProfiler")
+}
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) {
+  BiocManager::install("org.Hs.eg.db")
+}
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+mapping <- bitr(
+  sig_symbols,
+  fromType   = "SYMBOL",
+  toType     = "ENTREZID",
+  OrgDb      = org.Hs.eg.db
+)
+mapping <- mapping[!duplicated(mapping$ENTREZID), ]
+
+## 3. Over‐representation enrichment -----------------------------------------
+
+### 3.1 GO Biological Process
+go_bp <- enrichGO(
+  gene          = mapping$ENTREZID,
+  OrgDb         = org.Hs.eg.db,
+  ont           = "BP",
+  pAdjustMethod = "fdr",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+write.csv(as.data.frame(go_bp),
+          file.path(enrich_dir, "GO_BP_enrichment.csv"),
+          row.names = FALSE)
+
+### 3.2 KEGG Pathways
+kegg <- enrichKEGG(
+  gene         = mapping$ENTREZID,
+  organism     = "hsa",
+  pvalueCutoff = 0.05
+)
+kegg <- setReadable(kegg, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+write.csv(as.data.frame(kegg),
+          file.path(enrich_dir, "KEGG_enrichment.csv"),
+          row.names = FALSE)
+
+## 4. Enrichment plots --------------------------------------------------------
+
+library(ggplot2)
+
+# Dotplot: GO BP
+p1 <- dotplot(go_bp, showCategory = 20) +
+  ggtitle("GO Biological Processes (AD DEGs)") +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.y = element_text(size = 6),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+ggsave(file.path(enrich_dir, "GO_BP_dotplot.png"),
+       p1, width = 7, height = 6)
+
+# Dotplot: KEGG
+p2 <- dotplot(kegg, showCategory = 20) +
+  ggtitle("KEGG Pathways (AD DEGs)") +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.y = element_text(size = 6))
+ggsave(file.path(enrich_dir, "KEGG_dotplot.png"),
+       p2, width = 7, height = 6)
+
+## 5. Known Alzheimer’s genes -------------------------------------------------
+
+known_ad_genes <- c(
+  "APP", "PSEN1", "PSEN2", "MAPT", "APOE", "TREM2",
+  "CLU", "PICALM", "CR1", "BIN1", "ABCA7", "SORL1"
+)
+known_stats <- deg_all[rownames(deg_all) %in% known_ad_genes,
+                       c("logFC", "P.Value", "adj.P.Val", "t")]
+write.csv(known_stats,
+          file.path(enrich_dir, "known_AD_genes_stats.csv"),
+          row.names = TRUE)
+
+## 6. GSEA ---------------------------------------------------------------------
+
+# Prepare ranked list: SYMBOL → logFC
+gene_list <- deg_all$logFC
+names(gene_list) <- rownames(deg_all)
+gene_list <- sort(na.omit(gene_list), decreasing = TRUE)
+
+# Map SYMBOL → ENTREZID for GSEA
+symbol2entrez <- bitr(
+  names(gene_list),
+  fromType = "SYMBOL",
+  toType   = "ENTREZID",
+  OrgDb    = org.Hs.eg.db
+)
+gene_list_entrez <- gene_list[symbol2entrez$SYMBOL]
+names(gene_list_entrez) <- symbol2entrez$ENTREZID
+gene_list_entrez <- sort(gene_list_entrez, decreasing = TRUE)
+
+### 6.1 GSEA GO BP
+gsea_go <- gseGO(
+  geneList     = gene_list_entrez,
+  ont          = "BP",
+  OrgDb        = org.Hs.eg.db,
+  keyType      = "ENTREZID",
+  pvalueCutoff = 0.05,
+  verbose      = FALSE
+)
+write.csv(as.data.frame(gsea_go),
+          file.path(enrich_dir, "GSEA_GO_BP.csv"),
+          row.names = FALSE)
+
+### 6.2 GSEA KEGG
+gsea_kegg <- gseKEGG(
+  geneList     = gene_list_entrez,
+  organism     = "hsa",
+  pvalueCutoff = 0.05,
+  verbose      = FALSE
+)
+write.csv(as.data.frame(gsea_kegg),
+          file.path(enrich_dir, "GSEA_KEGG.csv"),
+          row.names = FALSE)
+
+## 7. GSEA Plots --------------------------------------------------------------
+
+p3 <- dotplot(gsea_go,  showCategory = 20) +
+  ggtitle("GSEA GO BP") +
+  theme_minimal(base_size = 10)
+ggsave(file.path(enrich_dir, "GSEA_GO_dotplot.png"), p3,
+       width = 7, height = 6)
+
+p4 <- dotplot(gsea_kegg, showCategory = 20) +
+  ggtitle("GSEA KEGG") +
+  theme_minimal(base_size = 10)
+ggsave(file.path(enrich_dir, "GSEA_KEGG_dotplot.png"), p4,
+       width = 7, height = 6)
+
+## 8. Session Info -------------------------------------------------------------
+
+writeLines(capture.output(sessionInfo()),
+           file.path(enrich_dir, "sessionInfo.txt"))
+
+message("Enrichment analysis complete. Results saved under:\n  ", enrich_dir)
